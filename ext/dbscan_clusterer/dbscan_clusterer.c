@@ -110,13 +110,14 @@ epsilon_neighbours_t *get_epsilon_neighbours(
     double epsilon,
     double (*dist)(point_t *a, point_t *b))
 {
+    int i;
     epsilon_neighbours_t *en = (epsilon_neighbours_t *)
         calloc(1, sizeof(epsilon_neighbours_t));
     if (en == NULL) {
         perror("Failed to allocate epsilon neighbours.");
         return en;
     }
-    for (int i = 0; i < num_points; ++i) {
+    for (i = 0; i < num_points; ++i) {
         if (i == index)
             continue;
         if (dist(&points[index], &points[i]) > epsilon)
