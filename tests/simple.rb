@@ -13,4 +13,4 @@ data = [[ 0, 10 ],
         [ 500, 300 ],
         [ 500, 302 ]]
 
-pp DbscanClusterer.dbscan(data,4,1)
+pp DbscanClusterer.dbscan(data,4,1,:euclidean2d)
