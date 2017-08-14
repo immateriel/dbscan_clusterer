@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <ruby.h>
+
 #define UNCLASSIFIED -1
 #define NOISE -2
 
@@ -17,14 +19,10 @@
 
 #define MAX_POINT_ELEMENTS 8
 
-typedef struct dist_s dist_t;
-struct dist_s {
-    void *dist;
-};
-
 typedef struct point_s point_t;
 struct point_s {
     double elements[MAX_POINT_ELEMENTS];
+    VALUE ruser;
     unsigned char num_elements;
     int cluster_id;
 };
@@ -194,8 +192,9 @@ int expand(
     if (seeds->num_members < minpts)
         points[index].cluster_id = NOISE;
     else {
+        node_t *h;
         points[index].cluster_id = cluster_id;
-        node_t *h = seeds->head;
+        h = seeds->head;
         while (h) {
             points[h->index].cluster_id = cluster_id;
             h = h->next;
@@ -231,8 +230,9 @@ int spread(
     if (spread == NULL)
         return FAILURE;
     if (spread->num_members >= minpts) {
-        node_t *n = spread->head;
+        node_t *n;
         point_t *d;
+        n = spread->head;
         while (n) {
             d = &points[n->index];
             if (d->cluster_id == NOISE ||
@@ -280,12 +280,9 @@ double euclidean_dist(point_t *a, point_t *b)
 
 /* ruby binding */
 
-#include <ruby.h>
-
 VALUE DbscanClusterer = Qnil;
 void Init_dbscan_clusterer();
 
-//VALUE method_dbscan_clusterer_dbscan(VALUE self, VALUE points, VALUE epsilon, VALUE minpts);
 VALUE method_dbscan_clusterer_dbscan(int argc, VALUE *argv, VALUE self);
 
 void Init_dbscan_clusterer() {
@@ -301,8 +298,6 @@ static inline void _ruby_array_to_point(VALUE rel, point_t *p) {
 
     p->num_elements = num_elts;
     p->cluster_id = UNCLASSIFIED;
-
-    return p;
 }
 
 static inline VALUE _point_to_ruby_array(point_t* p) {
@@ -313,89 +308,94 @@ static inline VALUE _point_to_ruby_array(point_t* p) {
 
     return rpoint;
 }
-/*
-int ruby_dist(point_t *a, point_t *b) {
 
-     VALUE passthrough = (VALUE)userdata;
-     VALUE cb;
-     VALUE cbdata;
 
-     cb = rb_ary_entry(passthrough, 0);
-     cbdata = rb_ary_entry(passthrough, 1);
+// FIXME: ugly hack for ruby callback
+typedef double (*dist_fun)(point_t *, point_t *);
 
-     rb_funcall(cb, rb_intern("call"), 2, INT2NUM(event),
-                cbdata);
+VALUE ruby_dist_proc;
 
-     return 0;
+double ruby_dist(point_t *a, point_t *b) {
+    VALUE ra = a->ruser;
+    VALUE rb = b->ruser;
+    VALUE r;
+    r = rb_funcall(ruby_dist_proc, rb_intern("call"), 2, ra, rb);
+    return NUM2DBL(r);
 }
 
-VALUE ext_register(VALUE obj, VALUE cb) {
-     VALUE passthrough;
-
-     if (rb_class_of(cb) != rb_cProc)
-         rb_raise(rb_eTypeError, "Expected Proc callback");
-
-     passthrough = rb_ary_new();
-     rb_ary_store(passthrough, 0, cb);
-
-     register_async_callback(internal_callback,
-                             (void *)passthrough);
- }
-*/
-// rb_define_method(c_extension, "register_async_proc",
-//                  ext_register, 2);
 // WARN: there is no check of points elements size
 VALUE method_dbscan_clusterer_dbscan(int argc, VALUE *argv, VALUE self) {
-//VALUE method_dbscan_clusterer_dbscan(VALUE self, VALUE points, VALUE epsilon, VALUE minpts) {
-    unsigned int i,j;
+    unsigned int i;
     unsigned int num_points;
     VALUE results;
     point_t *p;
     void *c_dist_func;
 
+    char ruser = 0;
+
     VALUE points;
     VALUE epsilon;
     VALUE minpts;
     VALUE dist_method;
-    VALUE dist_proc;
 
     VALUE euclidean_sym = ID2SYM(rb_intern("euclidean"));
     VALUE euclidean2d_sym = ID2SYM(rb_intern("euclidean2d"));
     VALUE approximated2d_sym = ID2SYM(rb_intern("approximated2d"));
-//    VALUE ruby_sym = ID2SYM(rb_intern("ruby"));
+    VALUE ruby_sym = ID2SYM(rb_intern("ruby"));
 
-    rb_scan_args(argc, argv, "32", &points, &epsilon, &minpts, &dist_method, &dist_proc);
+    rb_scan_args(argc, argv, "32", &points, &epsilon, &minpts, &dist_method, &ruby_dist_proc);
 
-    if(dist_method == Qnil) {
+    c_dist_func = euclidean_dist;
+    if (dist_method == Qnil) {
         c_dist_func = euclidean_dist;
-    } else if(dist_method == euclidean_sym) {
-        c_dist_func = euclidean_dist;        
-    } else if(dist_method == euclidean2d_sym) {
+    } else if (dist_method == euclidean_sym) {
+        c_dist_func = euclidean_dist;
+    } else if (dist_method == euclidean2d_sym) {
         c_dist_func = euclidean2d_dist;
-    } else if(dist_method == approximated2d_sym) {
+    } else if (dist_method == approximated2d_sym) {
         c_dist_func = approximated2d_dist;
+    } else if (dist_method == ruby_sym) {
+        if (rb_class_of(ruby_dist_proc) != rb_cProc)
+            rb_raise(rb_eTypeError, "Expected Proc callback");
+
+        ruser = 1;
+//        c_dist_func = (ruby_dist_cb(dist_proc));
+        c_dist_func = ruby_dist;
     } else {
-        c_dist_func = euclidean_dist;        
+        c_dist_func = euclidean_dist;
     }
 
     num_points = RARRAY_LEN(points);
     p = (point_t *) calloc(num_points, sizeof(point_t));
 
-    for(i=0;i<num_points;i++) {
+    for (i = 0; i < num_points; i++) {
         VALUE rel = rb_ary_entry(points, i);
-        _ruby_array_to_point(rel,&p[i]);
+        if (ruser) {
+            p[i].ruser = rel;
+            p[i].cluster_id = UNCLASSIFIED;
+        }
+        else {
+            _ruby_array_to_point(rel, &p[i]);
+        }
     }
 
     dbscan(p, num_points, NUM2DBL(epsilon), NUM2INT(minpts), c_dist_func);
 
     results = rb_hash_new();
 
-    for(i=0;i<num_points;i++) {
-        VALUE rpoint = _point_to_ruby_array(&p[i]);
-        VALUE rid = INT2NUM(p[i].cluster_id);
+    for (i = 0; i < num_points; i++) {
+        VALUE rpoint;
+        VALUE rid;
+        VALUE rpoints;
+        if (ruser) {
+            rpoint = p[i].ruser;
+        } else {
+            rpoint = _point_to_ruby_array(&p[i]);
+        }
+        rid = INT2NUM(p[i].cluster_id);
 
-        VALUE rpoints = rb_hash_aref(results, rid);
-        if(NIL_P(rpoints)) {
+        rpoints = rb_hash_aref(results, rid);
+        if (NIL_P(rpoints)) {
             rpoints = rb_ary_new();
             rb_hash_aset(results, rid, rpoints);
         }
